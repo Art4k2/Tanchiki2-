@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Tanks ECS: AI & Tactics</title>
+    <style>
+        /* Общие стили: убираем прокрутку и выделение текста */
+        body, html { 
+            margin: 0; padding: 0; overflow: hidden; background: #111; 
+            user-select: none; -webkit-user-select: none; touch-action: none;
+        }
+        canvas { display: block; position: absolute; top: 0; left: 0; z-index: 1; }
+        
+        /* Слой интерфейса */
+        #ui-container {
+            position: absolute; width: 100%; height: 100%;
+            pointer-events: none; z-index: 10; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        /* Кнопка настроек и меню */
+        #settings-wrapper { position: absolute; top: 20px; left: 20px; pointer-events: auto; }
+        #gear-btn {
+            font-size: 30px; cursor: pointer; background: rgba(0,0,0,0.6);
+            border-radius: 50%; width: 52px; height: 52px;
+            display: flex; align-items: center; justify-content: center;
+            color: white; border: 2px solid #555; transition: 0.2s;
+        }
+        #gear-btn:active { transform: scale(0.9); background: rgba(50,50,50,0.8); }
+        
+        #settings-menu {
+            display: none; background: rgba(25, 25, 25, 0.95);
+            border: 1px solid #444; padding: 15px; margin-top: 10px;
+            border-radius: 12px; color: white; width: 220px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        .menu-section { margin-bottom: 12px; }
+        .menu-section label { display: block; margin-bottom: 5px; font-size: 11px; color: #888; text-transform: uppercase; }
+        .tank-select {
+            background: #333; color: white; border: 1px solid #555;
+            padding: 10px; width: 100%; border-radius: 6px; cursor: pointer;
+        }
+
+        /* Кнопки управления (сенсорные) */
+        #controls-layout {
+            position: absolute; bottom: 30px; left: 20px; right: 20px;
+            display: flex; justify-content: space-between; align-items: flex-end;
+        }
+        .control-group { pointer-events: auto; display: flex; flex-direction: column; gap: 10px; }
+        .row { display: flex; gap: 10px; justify-content: center; }
+        
+        .btn {
+            width: 65px; height: 65px; background: rgba(255, 255, 255, 0.08);
+            border: 2px solid rgba(255, 255, 255, 0.2); border-radius: 15px;
+            color: white; font-weight: bold; display: flex; align-items: center; 
+            justify-content: center; transition: 0.1s;
+        }
+        .btn:active { background: rgba(255, 255, 255, 0.3); border-color: white; }
+        .btn-wide { width: 105px; font-size: 11px; text-transform: uppercase; }
+        
+        #btn-fire {
+            width: 95px; height: 95px; background: rgba(255, 50, 50, 0.2);
+            border-color: rgba(255, 100, 100, 0.4); border-radius: 50%;
+            font-size: 18px; text-shadow: 0 0 10px red;
+        }
+        #btn-fire:active { background: rgba(255, 50, 50, 0.6); }
+
+        /* Текст характеристик */
+        #stats { position: absolute; top: 20px; right: 20px; color: white; text-align: right; pointer-events: none; }
+        .hp-val { font-size: 24px; font-weight: bold; color: #4f4; }
+    </style>
+</head>
+<body>
+
+<div id="ui-container">
+    <div id="settings-wrapper">
+        <div id="gear-btn" onclick="toggleSettings(event)">⚙️</div>
+        <div id="settings-menu">
+            <div class="menu-section">
+                <label>Ваш танк:</label>
+                <select id="player-type" class="tank-select" onchange="updateTank('player', this.value)">
+                    <option value="TT">Тяжелый (TT)</option>
+                    <option value="ST">Средний (ST)</option>
+                    <option value="LT">Легкий (LT)</option>
+                    <option value="PT">ПТ-САУ (PT)</option>
+                </select>
+            </div>
+            <div class="menu-section">
+                <label>Танк противника (ИИ):</label>
+                <select id="bot-type" class="tank-select" onchange="updateTank('dummy', this.value)">
+                    <option value="LT">Легкий (LT)</option>
+                    <option value="ST">Средний (ST)</option>
+                    <option value="TT">Тяжелый (TT)</option>
+                    <option value="PT">ПТ-САУ (PT)</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <div id="stats">
+        <div id="player-hp-label">HP: <span id="player-hp" class="hp-val">1000</span></div>
+        <div id="reloading-ui" style="color: #aaa; font-size: 12px;">READY</div>
+    </div>
+
+    <div id="controls-layout">
+        <div class="control-group">
+            <div class="row">
+                <div class="btn btn-wide" id="btn-q">Turret ⟲</div>
+                <div class="btn btn-wide" id="btn-e">Turret ⟳</div>
+            </div>
+            <div class="row"><div class="btn" id="btn-w">W</div></div>
+            <div class="row">
+                <div class="btn" id="btn-a">A</div>
+                <div class="btn" id="btn-s">S</div>
+                <div class="btn" id="btn-d">D</div>
+            </div>
+        </div>
+        <div class="control-group">
+            <div class="btn" id="btn-fire">FIRE</div>
+        </div>
+    </div>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * --- ЧАСТЬ 1: БАЗОВЫЕ ДАННЫЕ И ECS ЯДРО ---
+ */
+
+const TANK_SPECS = {
+    TT: { name: 'TT', hp: 1200, speedFwd: 1.8, speedBwd: 1.2, rotSpeed: 0.04, armor: { front: 100, side: 60, rear: 40 }, dmg: 300, reload: 5000, turretType: 'free' },
+    PT: { name: 'PT', hp: 800, speedFwd: 2.0, speedBwd: 1.5, rotSpeed: 0.05, armor: { front: 120, side: 30, rear: 20 }, dmg: 500, reload: 7500, turretType: 'limited' },
+    LT: { name: 'LT', hp: 600, speedFwd: 3.5, speedBwd: 3.0, rotSpeed: 0.10, armor: { front: 30, side: 15, rear: 10 }, dmg: 120, reload: 2500, turretType: 'free' },
+    ST: { name: 'ST', hp: 900, speedFwd: 2.6, speedBwd: 2.0, rotSpeed: 0.07, armor: { front: 70, side: 45, rear: 30 }, dmg: 220, reload: 3800, turretType: 'free' }
+};
+
+// ECS Core
+class Entity { constructor(id) { this.id = id; this.components = {}; } addComponent(c) { this.components[c.name] = c; return this; } getComponent(n) { return this.components[n]; } hasComponent(n) { return !!this.components[n]; } }
+class Component { constructor(name) { this.name = name; } }
+
+// Данные
+class Transform extends Component { constructor(x, y, r = 0) { super('Transform'); this.pos = {x, y}; this.rotation = r; } }
+class TankData extends Component { constructor(type) { super('TankData'); this.spec = TANK_SPECS[type]; this.hp = this.spec.hp; this.turretRotation = 0; this.reloadTimer = 0; } }
+class InputState extends Component { constructor() { super('InputState'); this.keys = { up:0, down:0, left:0, right:0, fire:0, tLeft:0, tRight:0 }; } }
+class AIBehavior extends Component { constructor() { super('AIBehavior'); this.state = 'patrol'; this.target = null; } }
+class RayVisual extends Component { constructor(segments) { super('RayVisual'); this.segments = segments; this.timer = 1000; } }
+
+class World {
+    constructor() { this.entities = []; this.systems = []; this.idCount = 0; }
+    createEntity() { const e = new Entity(this.idCount++); this.entities.push(e); return e; }
+    addSystem(s) { this.systems.push(s); }
+    update(dt) { this.systems.forEach(s => s.update(this.entities, dt)); }
+}
+
+// Вспомогательная математика
+const Math2D = {
+    lerp: (a, b, t) => a + (b - a) * t,
+    angleDiff: (a, b) => {
+        let diff = b - a;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        return diff;
+    },
+    dist: (p1, p2) => Math.sqrt((p2.x - p1.x)**2 + (p2.y - p1.y)**2)
+}; 
+  /**
+ * --- ЧАСТЬ 2: СИСТЕМЫ ЛОГИКИ ---
+ */
+
+// 1. СИСТЕМА ВВОДА (Клавиатура + Кнопки UI)
+class InputSystem {
+    constructor() {
+        this.rawState = { w:0, s:0, a:0, d:0, q:0, e:0, '2':0 };
+        window.addEventListener('keydown', (e) => this.updateKey(e.key.toLowerCase(), 1));
+        window.addEventListener('keyup', (e) => this.updateKey(e.key.toLowerCase(), 0));
+    }
+    updateKey(k, v) { if (this.rawState.hasOwnProperty(k)) this.rawState[k] = v; }
+    update(entities) {
+        entities.forEach(e => {
+            if (e.hasComponent('InputState') && !e.hasComponent('AIBehavior')) {
+                const k = e.getComponent('InputState').keys;
+                const s = this.rawState;
+                k.up = s.w; k.down = s.s; k.left = s.a; k.right = s.d;
+                k.tLeft = s.q; k.tRight = s.e; k.fire = s['2'];
+            }
+        });
+    }
+}
+
+// 2. СИСТЕМА ИИ (Логика поведения бота)
+class AISystem {
+    update(entities, dt) {
+        const player = entities.find(e => e.hasComponent('InputState') && !e.hasComponent('AIBehavior'));
+        if (!player) return;
+        const pPos = player.getComponent('Transform').pos;
+
+        entities.forEach(e => {
+            if (e.hasComponent('AIBehavior')) {
+                const tr = e.getComponent('Transform');
+                const data = e.getComponent('TankData');
+                const keys = e.getComponent('InputState').keys;
+                
+                const dist = Math2D.dist(tr.pos, pPos);
+                const targetAngle = Math.atan2(pPos.y - tr.pos.y, pPos.x - tr.pos.x);
+
+                // Бот поворачивает корпус к игроку
+                const angleDiff = Math2D.angleDiff(tr.rotation, targetAngle);
+                keys.left = angleDiff < -0.2 ? 1 : 0;
+                keys.right = angleDiff > 0.2 ? 1 : 0;
+
+                // Бот держит дистанцию (не подъезжает вплотную)
+                keys.up = dist > 300 ? 1 : 0;
+                keys.down = dist < 200 ? 1 : 0;
+
+                // Бот крутит башней независимо от корпуса
+                const tAngleDiff = Math2D.angleDiff(data.turretRotation, targetAngle);
+                keys.tLeft = tAngleDiff < -0.05 ? 1 : 0;
+                keys.tRight = tAngleDiff > 0.05 ? 1 : 0;
+
+                // Огонь, если пушка смотрит в сторону игрока
+                keys.fire = (Math.abs(tAngleDiff) < 0.15 && dist < 600) ? 1 : 0;
+            }
+        });
+    }
+}
+
+// 3. СИСТЕМА ДВИЖЕНИЯ (Корпус + Башня)
+class MovementSystem {
+    update(entities, dt) {
+        entities.forEach(e => {
+            if (!e.hasComponent('Transform') || !e.hasComponent('InputState')) return;
+            const tr = e.getComponent('Transform');
+            const data = e.getComponent('TankData');
+            const keys = e.getComponent('InputState').keys;
+
+            // Движение корпуса (WASD)
+            tr.rotation += (keys.right - keys.left) * data.spec.rotSpeed * (dt/16);
+            const moveDir = { x: Math.cos(tr.rotation), y: Math.sin(tr.rotation) };
+            const speed = (keys.up ? data.spec.speedFwd : 0) - (keys.down ? data.spec.speedBwd : 0);
+            tr.pos.x += moveDir.x * speed * (dt/16);
+            tr.pos.y += moveDir.y * speed * (dt/16);
+
+            // Независимое вращение башни (Q/E или ИИ)
+            const tRotDir = keys.tRight - keys.tLeft;
+            if (data.spec.turretType === 'limited') {
+                // Логика для ПТ (башня не крутится назад)
+                const diff = Math2D.angleDiff(tr.rotation, data.turretRotation);
+                if (Math.abs(diff + tRotDir * 0.04) < 0.4) data.turretRotation += tRotDir * 0.04 * (dt/16);
+            } else {
+                data.turretRotation += tRotDir * 0.05 * (dt/16);
+            }
+        });
+    }
+}
+
+// 4. СИСТЕМА БОЯ (Лучи и урон)
+class CombatSystem {
+    constructor(world) { this.world = world; }
+    update(entities, dt) {
+        entities.forEach(e => {
+            if (!e.hasComponent('TankData')) return;
+            const data = e.getComponent('TankData');
+            if (data.reloadTimer > 0) data.reloadTimer -= dt;
+
+            const keys = e.getComponent('InputState').keys;
+            if (keys.fire && data.reloadTimer <= 0) {
+                this.shoot(e);
+                data.reloadTimer = data.spec.reload;
+            }
+        });
+    }
+
+    shoot(shooter) {
+        const tr = shooter.getComponent('Transform');
+        const data = shooter.getComponent('TankData');
+        const dir = { x: Math.cos(data.turretRotation), y: Math.sin(data.turretRotation) };
+        const startPos = { x: tr.pos.x + dir.x * 30, y: tr.pos.y + dir.y * 30 };
+        this.castRay(shooter, startPos, dir);
+    }
+
+    castRay(shooter, start, dir) {
+        let end = { x: start.x + dir.x * 1200, y: start.y + dir.y * 1200 };
+        let hit = null;
+
+        this.world.entities.forEach(target => {
+            if (target === shooter || !target.hasComponent('TankData')) return;
+            const tTr = target.getComponent('Transform');
+            const d = Math2D.dist(start, tTr.pos);
+            if (d < 45) hit = { target, pos: tTr.pos }; // Простая проверка круга
+        });
+
+        if (hit) {
+            end = hit.pos;
+            this.applyDamage(shooter, hit.target);
+        }
+        // Визуализация луча (передаём сегмент)
+        const e = this.world.createEntity();
+        e.addComponent(new RayVisual([{ a: start, b: end }]));
+    }
+
+    applyDamage(shooter, target) {
+        const sData = shooter.getComponent('TankData');
+        const tData = target.getComponent('TankData');
+        tData.hp -= sData.spec.dmg;
+        if (tData.hp <= 0) {
+            tData.hp = tData.spec.hp; // "Возрождение"
+            target.getComponent('Transform').pos = { x: Math.random()*600-300, y: Math.random()*600-300 };
+        }
+    }
+}
+  /**
+ * --- ЧАСТЬ 3: ГРАФИКА И ЗАПУСК ---
+ */
+
+// 1. СИСТЕМА ОТРИСОВКИ (Canvas Rendering)
+class RenderSystem {
+    constructor() {
+        this.canvas = document.getElementById('gameCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        window.addEventListener('resize', () => this.resize());
+        this.resize();
+    }
+
+    resize() {
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
+    }
+
+    update(entities) {
+        const ctx = this.ctx;
+        const player = entities.find(e => e.hasComponent('InputState') && !e.hasComponent('AIBehavior'));
+        const cam = player ? player.getComponent('Transform').pos : {x:0, y:0};
+
+        // Очистка экрана (Фон)
+        ctx.fillStyle = '#1a1a1a';
+        ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+        ctx.save();
+        // Камера: центрируем мир на игроке
+        ctx.translate(this.canvas.width/2 - cam.x, this.canvas.height/2 - cam.y);
+
+        // Рисуем сетку на земле
+        ctx.strokeStyle = '#252525';
+        ctx.lineWidth = 1;
+        for(let x = -1500; x <= 1500; x += 100) {
+            ctx.beginPath(); ctx.moveTo(x, -1500); ctx.lineTo(x, 1500); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(-1500, x); ctx.lineTo(1500, x); ctx.stroke();
+        }
+
+        entities.forEach(e => {
+            // Рисуем Танки
+            if (e.hasComponent('Transform') && e.hasComponent('TankData')) {
+                const tr = e.getComponent('Transform');
+                const data = e.getComponent('TankData');
+                
+                ctx.save();
+                ctx.translate(tr.pos.x, tr.pos.y);
+
+                // Рисуем корпус (вращается отдельно)
+                ctx.save();
+                ctx.rotate(tr.rotation);
+                ctx.fillStyle = e.hasComponent('AIBehavior') ? '#cc3333' : '#33aa33';
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 2;
+                ctx.fillRect(-22, -18, 44, 36);
+                ctx.strokeRect(-22, -18, 44, 36);
+                ctx.restore();
+
+                // Рисуем башню (вращается отдельно)
+                ctx.save();
+                ctx.rotate(data.turretRotation);
+                ctx.fillStyle = '#444444';
+                // Пушка
+                ctx.fillRect(0, -4, 35, 8);
+                // Основание башни
+                ctx.beginPath();
+                ctx.arc(0, 0, 14, 0, Math.PI*2);
+                ctx.fill();
+                ctx.stroke();
+                ctx.restore();
+                
+                ctx.restore();
+            }
+
+            // Рисуем эффекты выстрелов
+            if (e.hasComponent('RayVisual')) {
+                const rv = e.getComponent('RayVisual');
+                ctx.strokeStyle = `rgba(255, 255, 100, ${rv.timer / 1000})`;
+                ctx.lineWidth = 4;
+                rv.segments.forEach(s => {
+                    ctx.beginPath(); ctx.moveTo(s.a.x, s.a.y); ctx.lineTo(s.b.x, s.b.y); ctx.stroke();
+                });
+                rv.timer -= 16;
+                if (rv.timer <= 0) e.components = {}; // Удаляем объект эффекта после затухания
+            }
+        });
+        ctx.restore();
+
+        // Обновление цифр в UI
+        if (player) {
+            const d = player.getComponent('TankData');
+            document.getElementById('player-hp').innerText = Math.max(0, Math.round(d.hp));
+            document.getElementById('reloading-ui').innerText = d.reloadTimer > 0 ? 
+                `ЗАРЯДКА: ${(d.reloadTimer/1000).toFixed(1)}с` : 'ГОТОВ';
+        }
+    }
+}
+
+// 2. СБОРКА МИРА
+const world = new World();
+const input = new InputSystem();
+const render = new RenderSystem();
+
+world.addSystem(input);
+world.addSystem(new AISystem());
+world.addSystem(new MovementSystem());
+world.addSystem(new CombatSystem(world));
+
+// Создаем танки в глобальной области
+window.gameEntities = {
+    player: world.createEntity()
+        .addComponent(new Transform(0, 0))
+        .addComponent(new TankData('TT'))
+        .addComponent(new InputState()),
+    dummy: world.createEntity()
+        .addComponent(new Transform(400, 300, Math.PI))
+        .addComponent(new TankData('LT'))
+        .addComponent(new InputState())
+        .addComponent(new AIBehavior())
+};
+
+// 3. ФУНКЦИИ КНОПОК И МЕНЮ
+function toggleSettings(e) {
+    e.stopPropagation();
+    const m = document.getElementById('settings-menu');
+    m.style.display = m.style.display === 'block' ? 'none' : 'block';
+}
+
+function updateTank(key, type) {
+    const ent = window.gameEntities[key];
+    const data = ent.getComponent('TankData');
+    data.spec = TANK_SPECS[type];
+    data.hp = data.spec.hp;
+}
+
+// Привязка мобильного управления
+function bindBtn(id, key) {
+    const b = document.getElementById(id);
+    const start = (e) => { e.preventDefault(); input.updateKey(key, 1); };
+    const end = (e) => { e.preventDefault(); input.updateKey(key, 0); };
+    b.addEventListener('touchstart', start); b.addEventListener('touchend', end);
+    b.addEventListener('mousedown', start); b.addEventListener('mouseup', end);
+}
+
+bindBtn('btn-w', 'w'); bindBtn('btn-s', 's'); bindBtn('btn-a', 'a'); bindBtn('btn-d', 'd');
+bindBtn('btn-q', 'q'); bindBtn('btn-e', 'e'); bindBtn('btn-fire', '2');
+
+// 4. ГЛАВНЫЙ ИГРОВОЙ ЦИКЛ
+let lastTime = performance.now();
+function gameLoop(now) {
+    const dt = now - lastTime;
+    lastTime = now;
+    world.update(dt);
+    render.update(world.entities);
+    requestAnimationFrame(gameLoop);
+}
+requestAnimationFrame(gameLoop);
